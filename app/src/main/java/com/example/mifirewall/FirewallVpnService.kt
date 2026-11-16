@@ -67,19 +67,15 @@ class FirewallVpnService : VpnService() {
 
     private fun establishFirewall() {
         val prefs = getSharedPreferences("firewall_prefs", Context.MODE_PRIVATE)
-        val blockedWifi = prefs.getStringSet("blocked_wifi", emptySet()) ?: emptySet()
-        val blockedMobile = prefs.getStringSet("blocked_mobile", emptySet()) ?: emptySet()
+        val allowedWifi = prefs.getStringSet("allowed_wifi", emptySet()) ?: emptySet()
+        val allowedMobile = prefs.getStringSet("allowed_mobile", emptySet()) ?: emptySet()
 
         val isWifi = isConnectedToWifi()
-        val appsToBlock = if (isWifi) blockedWifi else blockedMobile
+        val appsToAllow = if (isWifi) allowedWifi else allowedMobile
 
         try {
             vpnInterface?.close()
             vpnInterface = null
-
-            if (appsToBlock.isEmpty()) {
-                return
-            }
 
             val builder = Builder()
                 .setSession("MiFirewall")
@@ -88,22 +84,22 @@ class FirewallVpnService : VpnService() {
                 .addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128)
                 .addRoute("::", 0)
 
-            var addedCount = 0
-            for (pkg in appsToBlock) {
-                if (pkg == packageName) continue
+            // Excluimos del túnel sin salida a las apps que tienen la casilla marcada (Permitidas).
+            // Todo lo que NO esté marcado entrará al túnel y se quedará sin internet.
+            for (pkg in appsToAllow) {
                 try {
-                    // Al añadir solo las apps bloqueadas al túnel sin salida,
-                    // pierden acceso a internet mientras las demás navegan normal.
-                    builder.addAllowedApplication(pkg)
-                    addedCount++
+                    builder.addDisallowedApplication(pkg)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
 
-            if (addedCount > 0) {
-                vpnInterface = builder.establish()
-            }
+            // Excluimos también a nuestra propia app por seguridad
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {}
+
+            vpnInterface = builder.establish()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -121,7 +117,7 @@ class FirewallVpnService : VpnService() {
             vpnInterface?.close()
         } catch (e: Exception) {}
         vpnInterface = null
-        stopForeground( true)
+        stopForeground(true)
         stopSelf()
     }
 
@@ -151,13 +147,13 @@ class FirewallVpnService : VpnService() {
         val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
                 .setContentTitle("Firewall Activo")
-                .setContentText("Filtrando conexiones de aplicaciones")
+                .setContentText("Solo las apps marcadas tienen acceso a Internet")
                 .setSmallIcon(android.R.drawable.ic_secure)
                 .build()
         } else {
             Notification.Builder(this)
                 .setContentTitle("Firewall Activo")
-                .setContentText("Filtrando conexiones de aplicaciones")
+                .setContentText("Solo las apps marcadas tienen acceso a Internet")
                 .setSmallIcon(android.R.drawable.ic_secure)
                 .build()
         }
