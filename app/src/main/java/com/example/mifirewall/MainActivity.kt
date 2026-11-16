@@ -13,10 +13,15 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
@@ -24,15 +29,17 @@ data class AppItem(
     val name: String,
     val packageName: String,
     val icon: Drawable,
-    var blockWifi: Boolean,
-    var blockMobile: Boolean
+    var allowWifi: Boolean,
+    var allowMobile: Boolean
 )
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var mainContainer: LinearLayout
     private lateinit var switchFirewall: SwitchCompat
     private lateinit var recyclerApps: RecyclerView
     private val appList = mutableListOf<AppItem>()
+    private var isAuthenticated = false
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -48,6 +55,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        mainContainer = findViewById(R.id.mainContainer)
         switchFirewall = findViewById(R.id.switchFirewall)
         recyclerApps = findViewById(R.id.recyclerApps)
         recyclerApps.layoutManager = LinearLayoutManager(this)
@@ -70,6 +78,51 @@ class MainActivity : AppCompatActivity() {
         loadInstalledApps()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (!isAuthenticated) {
+            mainContainer.visibility = View.INVISIBLE
+            authenticateUser()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Al salir o minimizar la app, vuelve a bloquearse para pedir huella al regresar
+        isAuthenticated = false
+        mainContainer.visibility = View.INVISIBLE
+    }
+
+    private fun authenticateUser() {
+        val executor = ContextCompat.getMainExecutor(this)
+        val biometricPrompt = BiometricPrompt(this, executor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    super.onAuthenticationSucceeded(result)
+                    isAuthenticated = true
+                    mainContainer.visibility = View.VISIBLE
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    super.onAuthenticationError(errorCode, errString)
+                    Toast.makeText(applicationContext, "Autenticación cancelada", Toast.LENGTH_SHORT).show()
+                    finish()
+                }
+            })
+
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Acceso a Mi Firewall")
+            .setSubtitle("Coloca tu huella digital para desbloquear")
+            .setAllowedAuthenticators(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+            .build()
+
+        biometricPrompt.authenticate(promptInfo)
+    }
+
     private fun startVpnService(action: String) {
         val intent = Intent(this, FirewallVpnService::class.java).apply {
             this.action = action
@@ -79,15 +132,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadInstalledApps() {
         val prefs = getSharedPreferences("firewall_prefs", Context.MODE_PRIVATE)
-        val blockedWifi = prefs.getStringSet("blocked_wifi", emptySet())?.toMutableSet() ?: mutableSetOf()
-        val blockedMobile = prefs.getStringSet("blocked_mobile", emptySet())?.toMutableSet() ?: mutableSetOf()
+        val allowedWifi = prefs.getStringSet("allowed_wifi", emptySet())?.toMutableSet() ?: mutableSetOf()
+        val allowedMobile = prefs.getStringSet("allowed_mobile", emptySet())?.toMutableSet() ?: mutableSetOf()
 
         val pm = packageManager
         val packages = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
 
         appList.clear()
         for (pkgInfo in packages) {
-            // Solo mostramos apps que realmente tienen permiso de usar Internet
             val permissions = pkgInfo.requestedPermissions
             if (permissions == null || !permissions.contains(Manifest.permission.INTERNET)) {
                 continue
@@ -102,25 +154,25 @@ class MainActivity : AppCompatActivity() {
                     name = appName,
                     packageName = pkgInfo.packageName,
                     icon = appIcon,
-                    blockWifi = blockedWifi.contains(pkgInfo.packageName),
-                    blockMobile = blockedMobile.contains(pkgInfo.packageName)
+                    allowWifi = allowedWifi.contains(pkgInfo.packageName),
+                    allowMobile = allowedMobile.contains(pkgInfo.packageName)
                 )
             )
         }
 
-        // Ordenar primero las que tienen algún bloqueo activo y luego alfabéticamente
-        appList.sortWith(compareByDescending<AppItem> { it.blockWifi || it.blockMobile }.thenBy { it.name.lowercase() })
+        // Ordena primero las aplicaciones que tienen permiso activo y luego alfabéticamente
+        appList.sortWith(compareByDescending<AppItem> { it.allowWifi || it.allowMobile }.thenBy { it.name.lowercase() })
 
         recyclerApps.adapter = AppAdapter(appList) { item, isWifiChanged ->
-            val currentWifi = prefs.getStringSet("blocked_wifi", emptySet())?.toMutableSet() ?: mutableSetOf()
-            val currentMobile = prefs.getStringSet("blocked_mobile", emptySet())?.toMutableSet() ?: mutableSetOf()
+            val currentWifi = prefs.getStringSet("allowed_wifi", emptySet())?.toMutableSet() ?: mutableSetOf()
+            val currentMobile = prefs.getStringSet("allowed_mobile", emptySet())?.toMutableSet() ?: mutableSetOf()
 
             if (isWifiChanged) {
-                if (item.blockWifi) currentWifi.add(item.packageName) else currentWifi.remove(item.packageName)
-                prefs.edit().putStringSet("blocked_wifi", currentWifi).apply()
+                if (item.allowWifi) currentWifi.add(item.packageName) else currentWifi.remove(item.packageName)
+                prefs.edit().putStringSet("allowed_wifi", currentWifi).apply()
             } else {
-                if (item.blockMobile) currentMobile.add(item.packageName) else currentMobile.remove(item.packageName)
-                prefs.edit().putStringSet("blocked_mobile", currentMobile).apply()
+                if (item.allowMobile) currentMobile.add(item.packageName) else currentMobile.remove(item.packageName)
+                prefs.edit().putStringSet("allowed_mobile", currentMobile).apply()
             }
 
             if (FirewallVpnService.isRunning) {
@@ -152,20 +204,19 @@ class MainActivity : AppCompatActivity() {
             holder.imgIcon.setImageDrawable(item.icon)
             holder.txtAppName.text = item.name
 
-            // Quitamos los listeners temporalmente para evitar disparos falsos al hacer scroll
             holder.chkWifi.setOnCheckedChangeListener(null)
             holder.chkMobile.setOnCheckedChangeListener(null)
 
-            holder.chkWifi.isChecked = item.blockWifi
-            holder.chkMobile.isChecked = item.blockMobile
+            holder.chkWifi.isChecked = item.allowWifi
+            holder.chkMobile.isChecked = item.allowMobile
 
             holder.chkWifi.setOnCheckedChangeListener { _, isChecked ->
-                item.blockWifi = isChecked
+                item.allowWifi = isChecked
                 onCheckChanged(item, true)
             }
 
             holder.chkMobile.setOnCheckedChangeListener { _, isChecked ->
-                item.blockMobile = isChecked
+                item.allowMobile = isChecked
                 onCheckChanged(item, false)
             }
         }
